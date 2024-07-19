@@ -140,7 +140,7 @@ func (apl *Applier) InitDBConnections() (err error) {
 	if err := apl.validateAndReadGlobalVariables(); err != nil {
 		return err
 	}
-	if !apl.migrationContext.AliyunRDS && !apl.migrationContext.GoogleCloudPlatform && !apl.migrationContext.AzureMySQL {
+	if !apl.migrationContext.AliyunRDS && !apl.migrationContext.GoogleCloudPlatform && !apl.migrationContext.AzureMySQL && !apl.migrationContext.OceanBase {
 		if impliedKey, err := mysql.GetInstanceKey(apl.db); err != nil {
 			return err
 		} else {
@@ -452,7 +452,7 @@ func (apl *Applier) AttemptInstantDDL() error {
 	// in situations where there may be long-running transactions.
 	tableLockTimeoutSeconds := apl.migrationContext.CutOverLockTimeoutSeconds * 2
 	apl.migrationContext.Log.Infof("Setting LOCK timeout as %d seconds", tableLockTimeoutSeconds)
-	lockTimeoutQuery := fmt.Sprintf(`set /* gh-ost */ session lock_wait_timeout:=%d`, tableLockTimeoutSeconds)
+	lockTimeoutQuery := fmt.Sprintf(`set /* gh-ost */ session lock_wait_timeout=%d`, tableLockTimeoutSeconds)
 	if _, err := apl.db.Exec(lockTimeoutQuery); err != nil {
 		return err
 	}
@@ -1245,22 +1245,26 @@ func (apl *Applier) ApplyIterationInsertQuery() (chunkSize int64, rowsAffected i
 	return chunkSize, rowsAffected, duration, nil
 }
 
-// LockOriginalTable places a write lock on the original table
-func (apl *Applier) LockOriginalTable() error {
-	query := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write`,
-		sql.EscapeName(apl.migrationContext.DatabaseName),
-		sql.EscapeName(apl.migrationContext.OriginalTableName),
-	)
-	apl.migrationContext.Log.Infof("Locking %s.%s",
-		sql.EscapeName(apl.migrationContext.DatabaseName),
-		sql.EscapeName(apl.migrationContext.OriginalTableName),
-	)
+// lockTable uses the dedicated cut-over session for both source and ghost locks.
+func (apl *Applier) lockTable(tableName string) error {
+	query := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write`, sql.EscapeName(apl.migrationContext.DatabaseName), sql.EscapeName(tableName))
+	apl.migrationContext.Log.Infof("Locking %s.%s", apl.migrationContext.DatabaseName, tableName)
 	apl.migrationContext.LockTablesStartTime = time.Now()
 	if _, err := sqlutils.ExecNoPrepare(apl.singletonDB, query); err != nil {
 		return err
 	}
-	apl.migrationContext.Log.Infof("Table locked")
+	apl.migrationContext.Log.Infof("Table %s locked", tableName)
 	return nil
+}
+
+// LockOriginalTable places a write lock on the original table.
+func (apl *Applier) LockOriginalTable() error {
+	return apl.lockTable(apl.migrationContext.OriginalTableName)
+}
+
+// LockGhostTable places a write lock on the ghost table in the same session.
+func (apl *Applier) LockGhostTable() error {
+	return apl.lockTable(apl.migrationContext.GetGhostTableName())
 }
 
 // UnlockTables makes tea. No wait, it unlocks tables.
@@ -1568,7 +1572,7 @@ func (apl *Applier) AtomicCutOverMagicLock(sessionIdChan chan int64, tableLocked
 
 	tableLockTimeoutSeconds := apl.migrationContext.CutOverLockTimeoutSeconds * 2
 	apl.migrationContext.Log.Infof("Setting LOCK timeout as %d seconds", tableLockTimeoutSeconds)
-	query = fmt.Sprintf(`set /* gh-ost */ session lock_wait_timeout:=%d`, tableLockTimeoutSeconds)
+	query = fmt.Sprintf(`set /* gh-ost */ session lock_wait_timeout=%d`, tableLockTimeoutSeconds)
 	if _, err := tx.Exec(query); err != nil {
 		tableLocked <- err
 		return err
@@ -1657,25 +1661,30 @@ func (apl *Applier) AtomicCutOverMagicLock(sessionIdChan chan int64, tableLocked
 	return nil
 }
 
-// AtomicCutoverRename
-func (apl *Applier) AtomicCutoverRename(sessionIdChan chan int64, tablesRenamed chan<- error) error {
-	tx, err := apl.db.Begin()
+func (apl *Applier) atomicCutoverRename(db *gosql.DB, sessionIdChan chan int64, tablesRenamed chan<- error) error {
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() {
 		tx.Rollback()
-		sessionIdChan <- -1
-		tablesRenamed <- fmt.Errorf("unexpected error in AtomicCutoverRename(), injected to release blocking channel reads")
+		if sessionIdChan != nil {
+			sessionIdChan <- -1
+		}
+		if tablesRenamed != nil {
+			tablesRenamed <- fmt.Errorf("unexpected error in AtomicCutoverRename(), injected to release blocking channel reads")
+		}
 	}()
-	var sessionId int64
-	if err := tx.QueryRow(`select /* gh-ost */ connection_id()`).Scan(&sessionId); err != nil {
-		return err
+	if sessionIdChan != nil {
+		var sessionId int64
+		if err := tx.QueryRow(`select /* gh-ost */ connection_id()`).Scan(&sessionId); err != nil {
+			return err
+		}
+		sessionIdChan <- sessionId
 	}
-	sessionIdChan <- sessionId
 
 	apl.migrationContext.Log.Infof("Setting RENAME timeout as %d seconds", apl.migrationContext.CutOverLockTimeoutSeconds)
-	query := fmt.Sprintf(`set /* gh-ost */ session lock_wait_timeout:=%d`, apl.migrationContext.CutOverLockTimeoutSeconds)
+	query := fmt.Sprintf(`set /* gh-ost */ session lock_wait_timeout=%d`, apl.migrationContext.CutOverLockTimeoutSeconds)
 	if _, err := tx.Exec(query); err != nil {
 		return err
 	}
@@ -1692,12 +1701,26 @@ func (apl *Applier) AtomicCutoverRename(sessionIdChan chan int64, tablesRenamed 
 	)
 	apl.migrationContext.Log.Infof("Issuing and expecting this to block: %s", query)
 	if _, err := tx.Exec(query); err != nil {
-		tablesRenamed <- err
+		if tablesRenamed != nil {
+			tablesRenamed <- err
+		}
 		return apl.migrationContext.Log.Errore(err)
 	}
-	tablesRenamed <- nil
+	if tablesRenamed != nil {
+		tablesRenamed <- nil
+	}
 	apl.migrationContext.Log.Infof("Tables renamed")
 	return nil
+}
+
+// AtomicCutoverRename retains the upstream MySQL cut-over session behavior.
+func (apl *Applier) AtomicCutoverRename(sessionIdChan chan int64, tablesRenamed chan<- error) error {
+	return apl.atomicCutoverRename(apl.db, sessionIdChan, tablesRenamed)
+}
+
+// AtomicCutoverRenameWithLock renames tables in OceanBase's lock-owning session.
+func (apl *Applier) AtomicCutoverRenameWithLock() error {
+	return apl.atomicCutoverRename(apl.singletonDB, nil, nil)
 }
 
 func (apl *Applier) ShowStatusVariable(variableName string) (result int64, err error) {

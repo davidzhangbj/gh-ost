@@ -273,6 +273,10 @@ func (mgtr *Migrator) canStopStreaming() bool {
 
 // onChangelogEvent is called when a binlog event operation on the changelog table is intercepted.
 func (mgtr *Migrator) onChangelogEvent(dmlEntry *binlog.BinlogEntry) (err error) {
+	// OceanBase binlog service may encode an UPSERT as DELETE followed by INSERT.
+	if dmlEntry.DmlEvent.NewColumnValues == nil {
+		return nil
+	}
 	// Hey, I created the changelog table, I know the type of columns it has!
 	switch hint := dmlEntry.DmlEvent.NewColumnValues.StringColumn(2); hint {
 	case "state":
@@ -954,7 +958,11 @@ func (mgtr *Migrator) cutOver() (err error) {
 	case base.CutOverAtomic:
 		// Atomic solution: we use low timeout and multiple attempts. But for
 		// each failed attempt, we throttle until replication lag is back to normal
-		err = mgtr.atomicCutOver()
+		if mgtr.migrationContext.OceanBase {
+			err = mgtr.atomicCutOverOceanBase()
+		} else {
+			err = mgtr.atomicCutOver()
+		}
 	case base.CutOverTwoStep:
 		err = mgtr.cutOverTwoStep()
 	default:
@@ -1048,6 +1056,39 @@ func (mgtr *Migrator) cutOverTwoStep() (err error) {
 	lockAndRenameDuration := mgtr.migrationContext.RenameTablesEndTime.Sub(mgtr.migrationContext.LockTablesStartTime)
 	renameDuration := mgtr.migrationContext.RenameTablesEndTime.Sub(mgtr.migrationContext.RenameTablesStartTime)
 	mgtr.migrationContext.Log.Debugf("Lock & rename duration: %s (rename only: %s). During mgtr time, queries on %s were locked or failing", lockAndRenameDuration, renameDuration, sql.EscapeName(mgtr.migrationContext.OriginalTableName))
+	return nil
+}
+
+// atomicCutOverOceanBase will lock down the original table and the ghost table, execute
+// what's left of last DML entries, and atomically swap original->old, then new->original.
+// It requires to execute RENAME TABLE when the table is LOCKED under WRITE LOCK, which is
+// used by the OceanBase compatibility path; upstream MySQL keeps its own cut-over.
+func (mgtr *Migrator) atomicCutOverOceanBase() (err error) {
+	atomic.StoreInt64(&mgtr.migrationContext.InCutOverCriticalSectionFlag, 1)
+	defer atomic.StoreInt64(&mgtr.migrationContext.InCutOverCriticalSectionFlag, 0)
+	atomic.StoreInt64(&mgtr.migrationContext.AllEventsUpToLockProcessedInjectedFlag, 0)
+
+	if err := mgtr.retryOperation(mgtr.applier.LockOriginalTable); err != nil {
+		return err
+	}
+
+	if err := mgtr.retryOperation(mgtr.waitForEventsUpToLock); err != nil {
+		return err
+	}
+	if err := mgtr.retryOperation(mgtr.applier.LockGhostTable); err != nil {
+		return err
+	}
+
+	if err := mgtr.applier.AtomicCutoverRenameWithLock(); err != nil {
+		return err
+	}
+	if err := mgtr.retryOperation(mgtr.applier.UnlockTables); err != nil {
+		return err
+	}
+
+	lockAndRenameDuration := mgtr.migrationContext.RenameTablesEndTime.Sub(mgtr.migrationContext.LockTablesStartTime)
+	renameDuration := mgtr.migrationContext.RenameTablesEndTime.Sub(mgtr.migrationContext.RenameTablesStartTime)
+	mgtr.migrationContext.Log.Debugf("Lock & rename duration: %s (rename only: %s). During this time, queries on %s were locked or failing", lockAndRenameDuration, renameDuration, sql.EscapeName(mgtr.migrationContext.OriginalTableName))
 	return nil
 }
 

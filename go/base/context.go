@@ -104,6 +104,7 @@ type MigrationContext struct {
 	AliyunRDS                bool
 	GoogleCloudPlatform      bool
 	AzureMySQL               bool
+	OceanBase                bool
 	AttemptInstantDDL        bool
 	Resume                   bool
 	Revert                   bool
