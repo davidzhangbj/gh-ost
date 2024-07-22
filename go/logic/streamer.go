@@ -168,6 +168,9 @@ func (es *EventsStreamer) readCurrentBinlogCoordinates() error {
 	}
 	binaryLogStatusTerm := mysql.ReplicaTermFor(es.dbVersion, "master status")
 	query := fmt.Sprintf("show /* gh-ost readCurrentBinlogCoordinates */ %s", binaryLogStatusTerm)
+	if es.migrationContext.OceanBase {
+		query = "show master status"
+	}
 	foundMasterStatus := false
 	err := sqlutils.QueryRowsMap(es.db, query, func(m sqlutils.RowMap) error {
 		if es.migrationContext.UseGTIDs {

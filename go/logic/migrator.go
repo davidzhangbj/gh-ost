@@ -1279,8 +1279,10 @@ func (mgtr *Migrator) initiateInspector() (err error) {
 	} else if mgtr.migrationContext.InspectorIsAlsoApplier() && !mgtr.migrationContext.AllowedRunningOnMaster {
 		return ErrMigrationNotAllowedOnMaster
 	}
-	if err := mgtr.inspector.validateLogSlaveUpdates(); err != nil {
-		return err
+	if !mgtr.migrationContext.OceanBase {
+		if err := mgtr.inspector.validateLogSlaveUpdates(); err != nil {
+			return err
+		}
 	}
 
 	return nil
