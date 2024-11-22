@@ -16,6 +16,7 @@ import (
 	gosql "database/sql"
 
 	"github.com/github/gh-ost/go/mysql"
+	"github.com/openark/golib/sqlutils"
 )
 
 var (
@@ -128,6 +129,16 @@ func validateOceanBaseConnection(db *gosql.DB, migrationContext *MigrationContex
 	}
 	if !enableLockPriority {
 		return errors.New("system parameter 'enable_lock_priority' should be true to support cut-over")
+	}
+
+	// try lock and unlock table
+	lockQuery := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write`, migrationContext.DatabaseName, migrationContext.OriginalTableName)
+	if _, err := sqlutils.ExecNoPrepare(db, lockQuery); err != nil {
+		return err
+	}
+	unlockQuery := `unlock /* gh-ost */ tables`
+	if _, err := sqlutils.ExecNoPrepare(db, unlockQuery); err != nil {
+		return err
 	}
 	return nil
 }
