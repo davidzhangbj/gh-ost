@@ -2068,6 +2068,7 @@ func (mgtr *Migrator) finalCleanup() error {
 		mgtr.migrationContext.Log.Errore(err)
 	}
 
+	mgtr.applier.StopChangelogWrites()
 	if err := mgtr.retryOperation(mgtr.applier.DropChangelogTable); err != nil {
 		return err
 	}

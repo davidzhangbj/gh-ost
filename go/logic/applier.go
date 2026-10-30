@@ -87,6 +87,9 @@ type Applier struct {
 	dmlUpdateQueryBuilder        *sql.DMLUpdateQueryBuilder
 	checkpointInsertQueryBuilder *sql.CheckpointInsertQueryBuilder
 
+	changelogWritesMutex   sync.RWMutex
+	changelogWritesStopped bool
+
 	migrationLockConn *gosql.Conn
 	migrationLockDB   *gosql.DB
 	migrationLockName string
@@ -844,19 +847,38 @@ func (apl *Applier) DropGhostTable() error {
 	return apl.dropTable(apl.migrationContext.GetGhostTableName())
 }
 
+// withChangelogWrite keeps the cleanup barrier held until the SQL completes.
+func (apl *Applier) withChangelogWrite(write func() error) error {
+	apl.changelogWritesMutex.RLock()
+	defer apl.changelogWritesMutex.RUnlock()
+	if apl.changelogWritesStopped {
+		return nil
+	}
+	return write()
+}
+
+// StopChangelogWrites drains in-flight writes and prevents writes after DROP.
+// Call only at final cleanup, not from DropChangelogTable (also used at startup).
+func (apl *Applier) StopChangelogWrites() {
+	apl.changelogWritesMutex.Lock()
+	defer apl.changelogWritesMutex.Unlock()
+	apl.changelogWritesStopped = true
+}
+
 // WriteChangelog writes a value to the changelog table.
 // It returns the hint as given, for convenience
 func (apl *Applier) WriteChangelog(hint, value string) (string, error) {
-	explicitId := 0
-	switch hint {
-	case "heartbeat":
-		explicitId = 1
-	case "state":
-		explicitId = 2
-	case "throttle":
-		explicitId = 3
-	}
-	query := fmt.Sprintf(`
+	err := apl.withChangelogWrite(func() error {
+		explicitId := 0
+		switch hint {
+		case "heartbeat":
+			explicitId = 1
+		case "state":
+			explicitId = 2
+		case "throttle":
+			explicitId = 3
+		}
+		query := fmt.Sprintf(`
 		insert /* gh-ost */
 		into
 			%s.%s
@@ -866,10 +888,12 @@ func (apl *Applier) WriteChangelog(hint, value string) (string, error) {
 		on duplicate key update
 			last_update=NOW(),
 			value=VALUES(value)`,
-		sql.EscapeName(apl.migrationContext.DatabaseName),
-		sql.EscapeName(apl.migrationContext.GetChangelogTableName()),
-	)
-	_, err := sqlutils.ExecNoPrepare(apl.db, query, explicitId, hint, value)
+			sql.EscapeName(apl.migrationContext.DatabaseName),
+			sql.EscapeName(apl.migrationContext.GetChangelogTableName()),
+		)
+		_, err := sqlutils.ExecNoPrepare(apl.db, query, explicitId, hint, value)
+		return err
+	})
 	return hint, err
 }
 
@@ -1993,6 +2017,7 @@ func (apl *Applier) ApplyDMLEventQueries(dmlEvents [](*binlog.BinlogDMLEvent)) e
 
 func (apl *Applier) Teardown() {
 	apl.migrationContext.Log.Debugf("Tearing down...")
+	apl.StopChangelogWrites()
 	apl.releaseMigrationLock()
 	apl.db.Close()
 	apl.singletonDB.Close()
