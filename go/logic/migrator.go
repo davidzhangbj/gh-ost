@@ -1636,6 +1636,10 @@ func (mgtr *Migrator) initiateThrottler() {
 	go mgtr.throttler.initiateThrottlerChecks()
 }
 
+func (mgtr *Migrator) requiresMetadataLockInstrumentation() bool {
+	return !mgtr.migrationContext.OceanBase || mgtr.migrationContext.CutOverType != base.CutOverAtomic
+}
+
 func (mgtr *Migrator) initiateApplier() error {
 	mgtr.applier = NewApplier(mgtr.migrationContext)
 	if err := mgtr.applier.InitDBConnections(); err != nil {
@@ -1679,15 +1683,21 @@ func (mgtr *Migrator) initiateApplier() error {
 		}
 	}
 
-	// ensure performance_schema.metadata_locks is available.
-	if err := mgtr.applier.StateMetadataLockInstrument(); err != nil {
-		mgtr.migrationContext.Log.Warning("unable to enable metadata lock instrument, see further error details")
-	}
-	if !mgtr.migrationContext.IsOpenMetadataLockInstruments {
-		if !mgtr.migrationContext.SkipMetadataLockCheck {
-			return mgtr.migrationContext.Log.Errorf("bailing out because metadata lock instrument not enabled. Use --skip-metadata-lock-check if you wish to proceed without. See https://github.com/github/gh-ost/pull/1536 for details")
+	// OceanBase uses a separate lock-owning cut-over session, not MySQL's MDL protocol.
+	if mgtr.requiresMetadataLockInstrumentation() {
+		// ensure performance_schema.metadata_locks is available.
+		if err := mgtr.applier.StateMetadataLockInstrument(); err != nil {
+			mgtr.migrationContext.Log.Warning("unable to enable metadata lock instrument, see further error details")
 		}
-		mgtr.migrationContext.Log.Warning("proceeding without metadata lock check. There is a small chance of data loss if another session accesses the ghost table during cut-over. See https://github.com/github/gh-ost/pull/1536 for details")
+		if !mgtr.migrationContext.IsOpenMetadataLockInstruments {
+			if !mgtr.migrationContext.SkipMetadataLockCheck {
+				return mgtr.migrationContext.Log.Errorf("bailing out because metadata lock instrument not enabled. Use --skip-metadata-lock-check if you wish to proceed without. See https://github.com/github/gh-ost/pull/1536 for details")
+			}
+			mgtr.migrationContext.Log.Warning("proceeding without metadata lock check. There is a small chance of data loss if another session accesses the ghost table during cut-over. See https://github.com/github/gh-ost/pull/1536 for details")
+		}
+
+	} else {
+		mgtr.migrationContext.Log.Infof("OceanBase atomic cut-over uses table locks; MySQL metadata_locks instrumentation is not required")
 	}
 
 	go mgtr.applier.InitiateHeartbeat()
