@@ -26,6 +26,8 @@ Otherwise you may specify your own list of replica servers you wish it to observ
 
   Example: `--throttle-control-replicas=myhost1.com:3306,myhost2.com,myhost3.com:3307`
 
+  Note that these must be replicas within the migrated table's replication chain. `gh-ost` does not verify that the hosts in the list are part of it, so unrelated hosts will report healthy lag while your real replicas go unmonitored.
+
 - `--max-lag-millis`: maximum allowed lag; any controlled replica lagging more than this value will cause throttling to kick in. When all control replicas have smaller lag than indicated, operation resumes.
 
 Note that you may dynamically change both `--max-lag-millis` and the `throttle-control-replicas` list via [interactive commands](interactive-commands.md)
@@ -89,8 +91,8 @@ The first check to suggest throttling stops the check; the status message will n
 The throttle status is printed as part of the periodic [status message](understanding-output.md):
 
 ```
-Copy: 0/2915 0.0%; Applied: 0; Backlog: 0/100; Elapsed: 41s(copy), 41s(total); streamer: mysql-bin.000551:47983; ETA: throttled, flag-file
-Copy: 0/2915 0.0%; Applied: 0; Backlog: 0/100; Elapsed: 42s(copy), 42s(total); streamer: mysql-bin.000551:49370; ETA: throttled, commanded by user
+Copy: 0/2915 0.0%; Applied: 0; Backlog: 0/100; Time: 41s(total), 41s(copy); streamer: mysql-bin.000551:47983; Lag: 0.01s, HeartbeatLag: 0.01s, State: throttled, flag-file; ETA: N/A
+Copy: 0/2915 0.0%; Applied: 0; Backlog: 0/100; Time: 42s(total), 42s(copy); streamer: mysql-bin.000551:49370; Lag: 0.01s, HeartbeatLag: 0.01s, State: throttled, commanded by user; ETA: N/A
 ```
 
 ### How long can you throttle for?
