@@ -1,4 +1,183 @@
-# gh-ost
+# gh-ost for OceanBase
+
+A community-maintained adaptation of [GitHub gh-ost](https://github.com/github/gh-ost)
+for OceanBase MySQL mode. This fork builds on the existing OceanBase adaptations in
+[whhe/gh-ost](https://github.com/whhe/gh-ost) and incorporates upstream updates.
+It is not an official GitHub or OceanBase distribution.
+
+## Why use gh-ost on OceanBase?
+
+**Migrate selected OceanBase Offline DDL operations without blocking application
+writes for the entire operation.** For validated operations that meet the prerequisites,
+this adaptation offers a ghost-table migration instead of running Offline DDL
+directly on the application table:
+
+1. Create a ghost table and apply the target DDL to it, without altering the application table.
+2. Copy existing rows while capturing and applying concurrent changes from a compatible binlog service.
+3. Catch up with those changes and swap table names during a brief locking window.
+
+This is an online migration implemented by the tool, not a change to OceanBase's
+native DDL algorithm. Applications can continue to SELECT, INSERT, UPDATE, and
+DELETE during row copy and change replay. **Cut-over still briefly blocks writes;
+this is not a lock-free or zero-impact operation.**
+
+### Previously validated scenarios
+
+| Category | Specific scenarios validated in earlier tests |
+| --- | --- |
+| Columns | Reorder with AFTER/FIRST; add an AUTO_INCREMENT column; make an existing non-auto-increment integer primary key auto-increment; add a STORED generated column; drop a column with a non-unique index; increase DECIMAL precision across a storage-width boundary without changing scale |
+| Primary keys | Add a primary key to a table that already has a suitable UNIQUE NOT NULL key; drop only the primary key constraint while retaining another shared UNIQUE NOT NULL key |
+| Character sets | Convert the character set of existing character columns |
+| Storage formats | Row store to column store; row store to hybrid row/column store; hybrid store to column store; hybrid store to row store. All conversions are immediate, without DELAYED |
+| Partitioning | Change partitioning rules; change automatic partitioning properties together with partitioning rules |
+
+See the [OceanBase Offline DDL validation matrix](doc/oceanbase-offline-ddl.md)
+for native DDL behavior, test conditions, and validation boundaries.
+
+**Validation scope:** Earlier tests used OceanBase 4.3.5.2 in MySQL mode. After
+integrating upstream `dd44453f`, only AUTO_INCREMENT column addition, AFTER column
+reordering, and `_ghc` cleanup were revalidated; a full regression was not run.
+The table above does not mean every scenario was retested on the current release,
+works on every OB version, or covers every ALTER variant in the same category.
+For operations with short native write-blocking periods, such as making an existing
+integer primary key auto-increment, first consider whether native DDL is preferable.
+
+## Using gh-ost with OceanBase
+
+### 1. Prerequisites
+
+- Use OceanBase **MySQL mode**. Oracle mode is outside the scope of this guide.
+- Deploy and configure a MySQL-compatible binlog service for the target tenant,
+  accessible to gh-ost and providing ROW-format events with full row images.
+  The examples below use one endpoint for both SQL and binlog access; verify that
+  your deployment and routing support this arrangement.
+  `--assume-rbr` does not install or enable a binlog service.
+- The source and target tables must share a stable primary key or UNIQUE NOT NULL
+  key usable by gh-ost. A table without a primary key may still be eligible, but
+  a suitable shared unique key is required.
+- The migration account needs appropriate privileges for table creation, ALTER,
+  data access, helper-table deletion, LOCK TABLES, and binlog access. It must also
+  be able to query `oceanbase.GV$OB_PARAMETERS`. Consult the upstream
+  [requirements and limitations](doc/requirements-and-limitations.md), but check
+  actual grants against your OB and binlog-service deployment rather than copying
+  MySQL GRANT statements or using a production administrator account.
+- The OB parameter `enable_lock_priority` must be `true`, and the deployment must
+  support the table-locking and RENAME behavior used by this adaptation. The tool
+  checks this prerequisite. Ask an administrator to assess configuration changes
+  rather than bypassing the check.
+- Reserve space for the ghost table, indexes, and retained old table. Assess CPU,
+  I/O, and binlog-retention requirements. Upstream restrictions on features such as
+  foreign keys and triggers still need review, and the target table must satisfy
+  OB's own constraints.
+
+### 2. Download an OceanBase-compatible build
+
+Download the package for your platform and `SHA256SUMS` from
+[this fork's Releases](https://github.com/davidzhangbj/gh-ost/releases).
+Do not assume official upstream binaries include this fork's OB adaptations.
+For Linux x86-64, run the following in the download directory:
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf gh-ost-linux-amd64.tar.gz
+./gh-ost --version
+```
+
+Checksum verification must pass, and the version and Git commit must match the
+selected release. Test in a non-production environment before first use.
+To build from source, use Go 1.25.12, as required by the current `go.mod`, or a
+compatible newer toolchain:
+
+```sh
+go build -o ./bin/gh-ost ./go/cmd/gh-ost
+```
+
+### 3. Example: add an AUTO_INCREMENT column
+
+This example uses a test table with a stable primary key `id`, no existing
+AUTO_INCREMENT column, and two ordinary columns, `v` and `pad`.
+Create the example table in a test environment using SQL:
+
+```sql
+CREATE TABLE demo (
+  id BIGINT NOT NULL PRIMARY KEY,
+  v BIGINT NOT NULL,
+  pad VARCHAR(32) NOT NULL
+);
+INSERT INTO demo VALUES (1, 10, 'first'), (2, 20, 'second');
+```
+
+Replace the connection placeholders below with your test configuration.
+`--ask-pass` prompts for the password so it is not included in command arguments,
+shell history, or documentation. This command includes `--execute` and
+**performs an actual schema migration**:
+
+```sh
+./gh-ost \
+  --host=YOUR_OB_BINLOG_CAPABLE_ENDPOINT \
+  --port=3306 \
+  --user=YOUR_MIGRATION_USER \
+  --database=YOUR_DATABASE \
+  --table=demo \
+  --alter="ADD COLUMN c BIGINT AUTO_INCREMENT" \
+  --ask-pass \
+  --allow-on-master \
+  --assume-rbr \
+  --chunk-size=1000 \
+  --max-lag-millis=3000 \
+  --execute
+```
+
+OceanBase is detected automatically; no `--oceanbase` flag is needed.
+`--allow-on-master` permits migration on a connection identified as the primary;
+it does not establish that all safety prerequisites are satisfied.
+During validation, keep application reads and writes running. After migration,
+check existing column values, non-null and unique generated values, and whether
+new INSERTs that omit `c` continue to generate values correctly.
+
+### 4. Example: reorder a column with AFTER
+
+For a table containing `id`, `v`, and `pad`, keep the connection and execution
+options above and replace the `--alter` argument with:
+
+```sh
+--alter="MODIFY COLUMN pad VARCHAR(32) NOT NULL AFTER id"
+```
+
+The target column order is `id,pad,v`. For a real migration, `MODIFY COLUMN` must
+retain the full intended column definition, including type, nullability, default,
+character set, and collation. Do not overwrite application column attributes by
+blindly copying this example.
+
+### 5. Before production use
+
+- Prepare backups, rehearse recovery, and validate migrations on the same OB
+  version and table structure. The two examples are not production certification.
+- Tune migration load for your application write rate and monitor replay progress.
+  This adaptation ignores `--max-load` and `--critical-load`; do not rely on them
+  to protect OB. Use OB monitoring, latency, and capacity controls instead.
+- If sustained writes exceed replay capacity, the event backlog can starve row
+  copy. Tests included timeouts before row copy started. Functional checks passed
+  after lowering sustained request rates; this does not establish completion
+  under high load.
+- To control cut-over manually, use
+  [`--postpone-cut-over-flag-file`](doc/interactive-commands.md) and allow for a
+  brief write-blocking window.
+- The old table is not automatically dropped by default. These examples do not
+  use `--ok-to-drop-table`. Review data checks and backup requirements before
+  following the cleanup instructions in the logs. Do not manually remove `_gho`,
+  `_ghc`, or other helper tables while migration is running. Retaining the old
+  table is not automatic rollback: post-cut-over writes are not replicated back
+  to it.
+
+---
+
+## Upstream gh-ost documentation
+
+The original upstream introduction and general MySQL documentation follow.
+Upstream statements about stability, production use, and replica testing are not
+validation claims for this OB adaptation. For OceanBase, follow the prerequisites
+and validation boundaries above.
 
 [![ci](https://github.com/github/gh-ost/actions/workflows/ci.yml/badge.svg)](https://github.com/github/gh-ost/actions/workflows/ci.yml) [![replica-tests](https://github.com/github/gh-ost/actions/workflows/replica-tests.yml/badge.svg)](https://github.com/github/gh-ost/actions/workflows/replica-tests.yml) [![downloads](https://img.shields.io/github/downloads/github/gh-ost/total.svg)](https://github.com/github/gh-ost/releases) [![release](https://img.shields.io/github/release/github/gh-ost.svg)](https://github.com/github/gh-ost/releases)
 
