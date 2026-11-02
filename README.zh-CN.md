@@ -30,16 +30,16 @@
 - 已部署并配置与目标租户对应、gh-ost 可访问的 MySQL 兼容 binlog 服务。
 - 原表和目标表必须共享 gh-ost 可用的稳定主键或 UNIQUE NOT NULL 键。
   无主键并不一定不能迁移，但不能没有合适的共享唯一键。
-- 账号具备建表、ALTER、数据读写、删除辅助表、LOCK TABLES、读取 binlog 等必要权限，
-  并能查询 `oceanbase.GV$OB_PARAMETERS`。参见上游
-  [权限及限制](doc/requirements-and-limitations.md)，具体授权应按 OB 和 binlog 服务配置核对，
-  不应直接照搬 MySQL 的 GRANT 语句或使用生产管理员账号。
+- 账号具备建表、ALTER、数据读写、删除表、LOCK TABLES。
 - OB 参数 `enable_lock_priority` 必须为 `true`，并支持本适配使用的锁表及 RENAME 行为。
-  工具会检查此前提；参数不满足时，应由管理员评估配置，而不是直接跳过检查。
+  工具会检查此前提；参数不满足时，应由管理员评估配置。
 - 预留影子表、索引和保留旧表所需的空间，评估复制、binlog 回放对 CPU、IO 和日志保留的影响。
-  外键、触发器等上游限制仍需检查，目标表也必须满足 OB 自身的约束。
+  外键、触发器等上游限制仍需检查。
 
 ### 2. 下载 OB 兼容版
+
+从[本仓库 Releases](https://github.com/davidzhangbj/gh-ost/releases)
+下载与你的操作系统和 CPU 架构对应的二进制包。
 
 以下以 Linux x86-64 为例，在下载目录执行：
 
@@ -103,8 +103,7 @@ INSERT INTO demo VALUES (1, 10, 'first'), (2, 20, 'second');
 
 ## 上游 gh-ost 项目介绍
 
-以下为上游项目介绍的中文说明。上游关于稳定性、生产使用和副本测试的说明，
-不等于本 OB 兼容版的验证承诺。在 OceanBase 上应以前述使用条件和验证范围为准。
+以下为上游项目介绍的中文说明。在 OceanBase 上应以前述使用条件和验证范围为准。
 原始英文介绍保留在 [英文 README](README.md#upstream-gh-ost-documentation) 中。
 
 ### GitHub 的 MySQL 在线表结构迁移工具
@@ -178,15 +177,4 @@ Transfigurator 等词解释这个缩写。
 [开发指南](doc/coding-ghost.md)。OB 兼容版的问题请提交到
 [本仓库 Issues](https://github.com/davidzhangbj/gh-ost/issues)，不要将 fork 特有的问题
 直接当作官方 gh-ost 已确认的问题。
-
-### 下载与构建
-
-OB 用户请使用[本仓库 Releases](https://github.com/davidzhangbj/gh-ost/releases)，
-不要误用不包含本仓库 OB 适配的[官方二进制](https://github.com/github/gh-ost/releases)。
-本项目提供 Linux 和 macOS 构建；可用产物以对应 Release 附件为准。
-
-源码构建须满足当前 `go.mod` 的工具链要求，不能套用上游 README 中旧的 Go 最低版本说明。
-简单构建命令见前文；[script/build](script/build) 用于项目构建，
-[build.sh](build.sh) 用于生成发布压缩包、RPM、DEB 和 `SHA256SUMS`。
-不要将上游的 GA 或生产稳定性描述理解为本 OB 兼容版已完成同等程度的认证。
 

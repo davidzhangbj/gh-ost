@@ -38,21 +38,18 @@ so the migration is not entirely transparent to applications.**
   key usable by gh-ost. A table without a primary key may still be eligible, but
   a suitable shared unique key is required.
 - The migration account needs appropriate privileges for table creation, ALTER,
-  data access, helper-table deletion, LOCK TABLES, and binlog access. It must also
-  be able to query `oceanbase.GV$OB_PARAMETERS`. Consult the upstream
-  [requirements and limitations](doc/requirements-and-limitations.md), but check
-  actual grants against your OB and binlog-service deployment rather than copying
-  MySQL GRANT statements or using a production administrator account.
+  data access, table deletion, LOCK TABLES.
 - The OB parameter `enable_lock_priority` must be `true`, and the deployment must
   support the table-locking and RENAME behavior used by this adaptation. The tool
-  checks this prerequisite. Ask an administrator to assess configuration changes
-  rather than bypassing the check.
+  checks this prerequisite. Ask an administrator to assess configuration changes.
 - Reserve space for the ghost table, indexes, and retained old table. Assess CPU,
   I/O, and binlog-retention requirements. Upstream restrictions on features such as
-  foreign keys and triggers still need review, and the target table must satisfy
-  OB's own constraints.
+  foreign keys and triggers still need review.
 
 ### 2. Download an OceanBase-compatible build
+
+Download the package matching your operating system and CPU architecture from
+[this repository's Releases](https://github.com/davidzhangbj/gh-ost/releases).
 
 For Linux x86-64, run the following in the download directory:
 
@@ -127,9 +124,7 @@ options above and replace the `--alter` argument with:
 ## Upstream gh-ost documentation
 
 The original upstream introduction and general MySQL documentation follow.
-Upstream statements about stability, production use, and replica testing are not
-validation claims for this OB adaptation. For OceanBase, follow the prerequisites
-and validation boundaries above.
+For OceanBase, follow the prerequisites and validation boundaries above.
 
 [![ci](https://github.com/github/gh-ost/actions/workflows/ci.yml/badge.svg)](https://github.com/github/gh-ost/actions/workflows/ci.yml) [![replica-tests](https://github.com/github/gh-ost/actions/workflows/replica-tests.yml/badge.svg)](https://github.com/github/gh-ost/actions/workflows/replica-tests.yml) [![downloads](https://img.shields.io/github/downloads/github/gh-ost/total.svg)](https://github.com/github/gh-ost/releases) [![release](https://img.shields.io/github/release/github/gh-ost.svg)](https://github.com/github/gh-ost/releases)
 
