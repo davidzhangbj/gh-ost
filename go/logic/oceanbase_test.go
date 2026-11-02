@@ -1,8 +1,9 @@
 package logic
 
 import (
-	"github.com/github/gh-ost/go/base"
 	"testing"
+
+	"github.com/github/gh-ost/go/base"
 )
 
 func TestOceanBaseMetadataInstrumentation(t *testing.T) {
@@ -26,5 +27,27 @@ func TestOceanBaseMetadataInstrumentation(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOceanBaseAllowOnMaster(t *testing.T) {
+	for _, ob := range []bool{false, true} {
+		for _, sameTarget := range []bool{false, true} {
+			for _, allow := range []bool{false, true} {
+				ctx := base.NewMigrationContext()
+				ctx.OceanBase = ob
+				ctx.AllowedRunningOnMaster = allow
+				ctx.InspectorConnectionConfig.Key.Hostname = "inspector"
+				ctx.ApplierConnectionConfig.Key.Hostname = "applier"
+				if sameTarget {
+					ctx.ApplierConnectionConfig.Key.Hostname = "inspector"
+				}
+				m := &Migrator{migrationContext: ctx}
+				want := !ob && sameTarget && !allow
+				if got := m.requiresAllowOnMaster(); got != want {
+					t.Errorf("ob=%v sameTarget=%v allow=%v: got %v, want %v", ob, sameTarget, allow, got, want)
+				}
+			}
+		}
 	}
 }

@@ -1220,6 +1220,14 @@ func (mgtr *Migrator) initiateServer() (err error) {
 	return nil
 }
 
+// requiresAllowOnMaster preserves the upstream opt-in for MySQL direct migrations.
+// OceanBase is detected during connection validation and does not require this flag.
+func (mgtr *Migrator) requiresAllowOnMaster() bool {
+	return !mgtr.migrationContext.OceanBase &&
+		mgtr.migrationContext.InspectorIsAlsoApplier() &&
+		!mgtr.migrationContext.AllowedRunningOnMaster
+}
+
 // initiateInspector connects, validates and inspects the "inspector" server.
 // The "inspector" server is typically a replica; it is where we issue some
 // queries such as:
@@ -1276,7 +1284,7 @@ func (mgtr *Migrator) initiateInspector() (err error) {
 		if mgtr.migrationContext.GetThrottleControlReplicaKeys().Len() == 0 {
 			mgtr.migrationContext.AddThrottleControlReplicaKey(mgtr.migrationContext.InspectorConnectionConfig.Key)
 		}
-	} else if mgtr.migrationContext.InspectorIsAlsoApplier() && !mgtr.migrationContext.AllowedRunningOnMaster {
+	} else if mgtr.requiresAllowOnMaster() {
 		return ErrMigrationNotAllowedOnMaster
 	}
 	if !mgtr.migrationContext.OceanBase {
